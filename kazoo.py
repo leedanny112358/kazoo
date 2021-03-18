@@ -1,54 +1,68 @@
 import numpy as np
 import os
-import json
 import librosa, librosa.display
 import soundfile as sf
-from soundfile import SoundFile
 import matplotlib.pyplot as plt
 from keras.datasets import mnist
-from keras.layers import Input, Dense
+from keras.layers import Input, Conv2D, MaxPooling2D, UpSampling2D, Conv2DTranspose
 from keras.models import Model
 from keras.preprocessing import image
-import keras.losses
 
-dataset = {
-    "piano": [],
-    "spectrogram": []
-  }
-
+training_dataset = {
+  "spectrogram": [],
+  "note": []
+}
 
 # loop through all data and preprocess
 def process_data(path):
   for i, (dirpath, dirnames, filenames) in enumerate(os.walk(path)):
     if dirpath != path:
       print("Processing {} notes".format(dirpath))
-      dataset["piano"].append(dirpath.split("/")[-1])
       for file in filenames:
-        print("Processing file {} ".format(file))
-        file_path = os.path.join(dirpath,file)
-        signal,sr = librosa.load(file_path,sr=22050)
-        stft = librosa.core.stft(signal[0:sr*2], n_fft=2048, hop_length=512)
-        spectrogram = np.abs(stft)
-        dataset["spectrogram"].append(spectrogram)   
-  
-  #with open("dataset.json", "w") as fp:
-    #json.dump(dataset, fp, indent=2)
-
-process_data("./dataset")
-#with open("./dataset.json", 'r') as j:
-  #process_data = json.loads(j.read())
+        if file != ".DS_Store":
+          training_dataset["note"].append(file)
+          file_path = os.path.join(dirpath,file)
+          signal,sr = librosa.load(file_path,sr=22050)
+          stft = librosa.core.stft(signal[0:45050], n_fft=2047, hop_length=512)
+          spectrogram = np.abs(stft)
+          training_dataset["spectrogram"].append(spectrogram)   
 
 def pre_process(X):
-  X = X/200.0
-  print(len(X))
-  X = X.reshape((len(X), 89175))
+  norm_data = []
+  for data in X:
+    max_value = np.amax(data)
+    norm_data.append(data/max_value)
+  X = X.reshape((len(X), 1024, 88, 1))
   return X
-print(np.array(dataset["spectrogram"]).shape)
-X_train  =  pre_process(np.array(dataset["spectrogram"][100:1058]))
-X_test  =  pre_process(np.array(dataset["spectrogram"][0:100]))
-print(X_train.shape)
 
-def show_data(X, n=10, height=87, width=1025, title=""):
+def add_noise(specs):
+  signal,sr = librosa.load("./noise.wav",sr=22050)
+  noise = librosa.core.stft(signal[0:45050], n_fft=2047, hop_length=512)
+  specs += noise
+  return specs
+
+# NOTE: Please refer to the following blocks of code to test out the different experimentations
+experiment = 1
+# vanilla notes
+if experiment == 0:
+  process_data("./notes")
+  X_train  =  pre_process(np.array(training_dataset["spectrogram"][100:1000]))
+  X_test  =  pre_process(np.array(training_dataset["spectrogram"][0:100]))
+# train noise / test clean
+if experiment ==  1:
+  process_data("./notes")
+  X_train = pre_process(np.array(add_noise(training_dataset["spectrogram"][100:1000])))
+  X_test = pre_process(np.array(training_dataset["spectrogram"][0:100]))
+# trained clean / test noise
+if experiment == 2:
+  process_data("./notes")
+  X_train = pre_process(np.array(training_dataset["spectrogram"][100:1000]))
+  X_test = pre_process(np.array(add_noise(training_dataset["spectrogram"][0:100])))
+
+print(X_train.shape)
+print(X_test.shape)
+
+def show_data(X, n=10, height=88, width=1024, title=""):
     plt.figure(figsize=(5, 5))
     for i in range(n):
         ax = plt.subplot(2,n,i+1)
@@ -58,42 +72,51 @@ def show_data(X, n=10, height=87, width=1025, title=""):
         ax.get_yaxis().set_visible(False)
     plt.suptitle(title, fontsize = 20)
 
-#show_data(X_train, title="train data")
-#show_data(X_test, title="test data")
+input_layer = Input(shape=(1024, 88, 1), name="INPUT")
+x = Conv2D(16, (3, 3), activation='relu', padding='same')(input_layer)
+x = MaxPooling2D((2, 2))(x)
+x = Conv2D(8, (3, 3), activation='relu', padding='same')(x)
+x = MaxPooling2D((2, 2))(x)
+x = Conv2D(8, (3, 3), activation='relu', padding='same')(x)
 
-input_dim, output_dim = 89175, 89175
-encode_dim = 100
-hidden_dim = 256
+code_layer = MaxPooling2D((2, 2), name="CODE")(x)
 
-# encoder
-input_layer = Input(shape=(input_dim,), name="INPUT")
-hidden_layer_1 = Dense(hidden_dim, activation='relu', name="HIDDEN_1")(input_layer)
-
-# code
-code_layer = Dense(encode_dim, activation='relu', name="CODE")(hidden_layer_1)
-
-# decoder
-hidden_layer_2 = Dense(hidden_dim, activation='relu', name="HIDDEN_2")(code_layer)
-output_layer = Dense(output_dim, activation='sigmoid', name="OUTPUT")(hidden_layer_2)
+x = Conv2DTranspose(8, (3, 3), activation='relu', padding='same')(code_layer)
+x = UpSampling2D((2, 2))(x)
+x = Conv2DTranspose(8, (3, 3), activation='relu', padding='same')(x)
+x = UpSampling2D((2, 2))(x)
+x = Conv2DTranspose(16, (3, 3), activation='relu', padding='same')(x)
+x = UpSampling2D((2,2))(x)
+output_layer = Conv2D(1, (3, 3), padding='same', name="OUTPUT")(x)
 
 AE = Model(input_layer, output_layer)
-AE.compile(optimizer='adam', loss='binary_crossentropy')
+AE.compile(optimizer='adam', loss='mse')
 AE.summary()
 
-AE.fit(X_train, X_train, epochs=10)
+AE.fit(X_train, X_train,
+                epochs=15,
+                batch_size=32,
+                shuffle=True,
+                validation_data=(X_test, X_test))
 
+AE.save("kazoo.h5")
 decoded_data = AE.predict(X_test)
 
-#show_data(X_test, title="original data")
-
-#show_data(decoded_data, title="decoded data")
-#plt.show()
-for i in range(88):
-  sound = decoded_data[i].reshape(1025,87)
-  sound = sound * 255.0
-  log_sound = librosa.amplitude_to_db(sound)
-  librosa.display.specshow(log_sound,sr=22050,hop_length=512)
+for i in range(25):
+  synth_sound = decoded_data[i].reshape(1024,88)
+  original_sound = X_test[i].reshape(1024,88)
+  log_synth_sound = librosa.amplitude_to_db(synth_sound)
+  log_original_sound = librosa.amplitude_to_db(original_sound)
+  librosa.display.specshow(log_synth_sound,sr=22050,hop_length=512)
+  title = "Generated Spec for {}".format(training_dataset["note"][i])
+  plt.suptitle(title, fontsize = 20)
+  plt.xlabel("time")
+  plt.ylabel("frequency")
   plt.show()
-  audio = librosa.istft(sound, hop_length=512)
-  name = "audio_{}.wav".format(i)
+  librosa.display.specshow(log_original_sound,sr=22050,hop_length=512)
+  title = "Original Spec for {}".format(training_dataset["note"][i])
+  plt.suptitle(title, fontsize = 20)
+  plt.show()
+  audio = librosa.istft(synth_sound, hop_length=512)
+  name = "synth_{}.wav".format(training_dataset["note"][i])
   sf.write(name,audio,22050)
